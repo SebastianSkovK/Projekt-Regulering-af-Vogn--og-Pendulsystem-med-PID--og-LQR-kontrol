@@ -1,0 +1,520 @@
+// // The next code is from Machine Expert, SR-Main (PRG)
+// Pendul encoder
+Pendul_Encoder.F_Preset := onPendul;
+Pendul_Encoder.F_Enable := onPendul;
+Pendul_Encoder.Validity;
+pendulEncCur := Pendul_Encoder.CurrentValue;
+//Pendul_Q := pendulEncCur * (360.0/1024.0); // calc angel from 0-360 deg
+PendulumAngleSensorPrev := PendulumAngleSensor;
+PendulumAngleSensor := pendulEncCur * (2*3.1415/1024.0); // calc Radians from 0-2 PI/Rad
+Pendul_Q := PendulumAngleSensor;
+
+// Motor encoder
+Motor_Encoder.Validity;
+Motor_Encoder.CurrentValue;
+GVL.servoActive;
+GVL.servoNoFault;
+
+// Enable DC Motor
+Motor_Encoder.F_Preset := GVL.enableMotorEncoder;
+Motor_Encoder.F_Enable := GVL.enableMotorEncoder;
+GVL.enableSafety := TRUE; 
+
+pendulVelocity := (Pendul_Q - Pendul_Q_Prew)/cycleTime; 
+
+motorMVoltMaxMin := 10000;
+
+CASE state OF 
+	0:
+		GVL.motorVolt := 0;
+		pendulIntegralError := 0;
+		pendulError := 0;
+		pendulVelocity := 0;
+		pendulVelocityPrev := 0;
+		Pendul_Q := 0;
+		Pendul_Q_Prew := 0;
+		cartPos_prev := 0;
+		cartVelocity := 0;
+		cartVelocityPrev := 0;
+		
+		GVL.enableMotorEncoder := FALSE;
+		Motor_Encoder.F_Preset := FALSE;
+		// test
+		
+		FIR := 0.8;
+		volt_prev := 0;
+		
+		
+		recordCounter := 0;
+		
+		state := 5;
+
+	5: // Home
+		Homing();
+		IF Homing.OUT_Done THEN 
+			state := 30;
+		END_IF
+		//
+		
+	10: // do cool stuff
+		IF RunPID THEN
+			GVL.enableMotor := TRUE;
+			Cart_pos := Motor_Encoder.CurrentValue / GVL.Steps_pr_meters;
+			
+			pendulError := 3.1415 - Pendul_Q;
+			
+			
+			// Keep inside of the Work Space
+			IF Motor_Encoder.CurrentValue < -4000 +(GVL.totalBeltEncoderLen - 200*2)/2 THEN
+				// pendulError := Pendul_Q -(3.1415/180)*0.25;
+				pendulError := (3.1415 + (3.1415/180)*0.2) - Pendul_Q;
+			ELSIF Motor_Encoder.CurrentValue > 4000+(GVL.totalBeltEncoderLen - 200*2)/2 THEN
+				// pendulError := Pendul_Q +(3.1415/180)*0.25;
+				pendulError := (3.1415 - (3.1415/180)*0.2) - Pendul_Q;
+			END_IF
+			// END Work Space
+			
+		
+			IF actuatorError = 0 THEN
+				pendulIntegralError := pendulIntegralError + Ki*(pendulError+pendulErrorPrev)/2 * cycleTime;
+			ELSE
+				pendulIntegralError := pendulIntegralError;
+			END_IF
+			
+			Fc_calcualted := (Kp*pendulError + pendulIntegralError - Kd * pendulVelocity);
+		
+			motorMVoltCalc := ((Fc_calcualted * 0.025)/3)/1.8 * 10000;
+			
+			
+			// %% && Add extra Stiction Friction Torque:
+			IF motorMVoltCalc > 250 THEN
+				motorMVoltCalc := motorMVoltCalc + 500;
+			ELSIF motorMVoltCalc < -250 THEN
+				motorMVoltCalc := motorMVoltCalc - 500;
+			END_IF
+			// %% &&
+			
+			
+			// %% && Actuator
+			IF motorMVoltCalc > motorMVoltMaxMin THEN
+				actuatorError :=  motorMVoltCalc - motorMVoltMaxMin; 
+				GVL.motorVolt := LREAL_TO_INT( motorMVoltMaxMin );
+			ELSIF motorMVoltCalc < -motorMVoltMaxMin THEN
+				actuatorError :=  motorMVoltMaxMin + motorMVoltCalc; 
+				GVL.motorVolt := LREAL_TO_INT( -motorMVoltMaxMin );
+			ELSE
+				actuatorError := 0;
+				GVL.motorVolt := LREAL_TO_INT( motorMVoltCalc );
+			END_IF
+			
+			// // Set values for next cycle.
+			// outputDerivativePrev := outputDerivative;
+			pendulErrorPrev := pendulError;
+			// //
+		END_IF
+		
+	20: // Swing up
+		GVL.enableMotor := TRUE;
+		Cart_pos := Motor_Encoder.CurrentValue / GVL.Steps_pr_meters;
+		cartVelocity := (Cart_pos-cartPos_prev) / cycleTime;
+		k_swing := 5;
+		cart_max_swing := 0.5;
+		
+		IF (pendulVelocity * COS(Pendul_Q)) > 0 THEN
+    		sign := 1;
+		ELSE
+    		sign := -1;
+		END_IF
+		
+		Energi_Sys := (1/2) * (Mc * cartVelocity * cartVelocity + m * (cartVelocity * cartVelocity + 2 * cartVelocity * l * pendulVelocity * COS(Pendul_Q) + l * l * pendulVelocity*pendulVelocity) + I * pendulVelocity*pendulVelocity) - m* g* l * COS(Pendul_Q);
+    	
+		accel_pendul := k_swing * (Energi_Sys - Epot) * sign;
+		
+		position_penalty := 10 * TANH(5* (Cart_pos-cart_max_swing)) - 10 * TANH(5* (-cart_max_swing - Cart_pos));
+    	force_swing := accel_pendul * (Mc + m) + c * cartVelocity - m * l * (-b * pendulVelocity + accel_pendul + m * l * g * Pendul_Q) / (I + m * l * l - m * l) - position_penalty;
+		
+		motorMVoltCalc := ((force_swing * 0.025)/3)/1.8 * 10000;
+		
+	// %% && Add extra Stiction Friction Torque:
+			IF motorMVoltCalc > 250 THEN
+				motorMVoltCalc := motorMVoltCalc + 500;
+			ELSIF motorMVoltCalc < -250 THEN
+				motorMVoltCalc := motorMVoltCalc - 500;
+			END_IF
+			// %% &&
+			
+			
+			// %% && Actuator
+			IF motorMVoltCalc > motorMVoltMaxMin THEN
+				actuatorError :=  motorMVoltCalc - motorMVoltMaxMin; 
+				GVL.motorVolt := LREAL_TO_INT( motorMVoltMaxMin );
+			ELSIF motorMVoltCalc < -motorMVoltMaxMin THEN
+				actuatorError :=  motorMVoltMaxMin + motorMVoltCalc; 
+				GVL.motorVolt := LREAL_TO_INT( -motorMVoltMaxMin );
+			ELSE
+				actuatorError := 0;
+				GVL.motorVolt := LREAL_TO_INT( motorMVoltCalc );
+			END_IF
+		
+	30: // LQR controller
+		IF Pendul_Q > 3.14*0.85 AND Pendul_Q < 3.14*1.15 THEN
+			RunPID := TRUE;
+		END_IF
+		
+		IF RunPID THEN
+			GVL.enableMotor := TRUE;
+			Cart_pos := Motor_Encoder.CurrentValue / GVL.Steps_pr_meters;
+			Cart_pos_Middle := GVL.totalBeltEncoderLen / GVL.Steps_pr_meters / 2;
+			cartVelocity := (Cart_pos-cartPos_prev) / cycleTime;
+			pendulError := 3.1415 - Pendul_Q;
+			
+			
+			// LQR gain controller
+			Fc_calcualted := 1*(K[1,1]*(Cart_pos_Middle-Cart_pos) + K[2,1]*(3.1415-Pendul_Q) + K[3,1]*(0-cartVelocity) + K[4,1]*(0-pendulVelocity));
+			motorMVoltCalc := ((Fc_calcualted * 0.025)/3)/1.8 * 10000;
+			
+			IF ABS(cartVelocity) < 0.25 AND ABS(motorMVoltCalc) < 600 THEN
+				IF motorMVoltCalc > 0 THEN
+					motorMVoltCalc := 600;
+				ELSIF motorMVoltCalc < 0 THEN
+					motorMVoltCalc := -600;
+				END_IF
+				
+			END_IF
+			// %% &&
+			
+			// %% && Actuator
+			IF motorMVoltCalc > motorMVoltMaxMin THEN
+				actuatorError :=  motorMVoltCalc - motorMVoltMaxMin; 
+				GVL.motorVolt := LREAL_TO_INT( motorMVoltMaxMin );
+			ELSIF motorMVoltCalc < -motorMVoltMaxMin THEN
+				actuatorError :=  motorMVoltMaxMin + motorMVoltCalc; 
+				GVL.motorVolt := LREAL_TO_INT( -motorMVoltMaxMin );
+			ELSE
+				actuatorError := 0;
+				GVL.motorVolt := LREAL_TO_INT( motorMVoltCalc );
+			END_IF
+			
+			cartVelocityPrev := cartVelocity;
+		END_IF
+		
+	40: // PID - LQR = F
+		IF RunPID THEN
+			GVL.enableMotor := TRUE;
+			Cart_pos := Motor_Encoder.CurrentValue / GVL.Steps_pr_meters;
+			
+			pendulError := 3.1415 - Pendul_Q;
+			
+			
+			// Keep inside of the Work Space
+			IF Motor_Encoder.CurrentValue < -4000 +(GVL.totalBeltEncoderLen - 200*2)/2 THEN
+				// pendulError := Pendul_Q -(3.1415/180)*0.25;
+				pendulError := (3.1415 + (3.1415/180)*0.2) - Pendul_Q;
+			ELSIF Motor_Encoder.CurrentValue > 4000+(GVL.totalBeltEncoderLen - 200*2)/2 THEN
+				// pendulError := Pendul_Q +(3.1415/180)*0.25;
+				pendulError := (3.1415 - (3.1415/180)*0.2) - Pendul_Q;
+			END_IF
+			// END Work Space
+			
+		
+			IF actuatorError = 0 THEN
+				pendulIntegralError := pendulIntegralError + Ki*(pendulError+pendulErrorPrev)/2 * cycleTime;
+			ELSE
+				pendulIntegralError := pendulIntegralError;
+			END_IF
+			
+			Fc_calcualted := (Kp*pendulError + pendulIntegralError - Kd * pendulVelocity);
+			
+			// // // LQR
+			Cart_pos_Middle := GVL.totalBeltEncoderLen / GVL.Steps_pr_meters / 2;
+			cartVelocity := (Cart_pos-cartPos_prev) / cycleTime;
+			// LQR gain controller
+			Fc_calcualted_lqr := 1*(K[1,1]*(Cart_pos-Cart_pos_Middle) + K[2,1]*(pendulError) + K[3,1]*(cartVelocity-0) + K[4,1]*(pendulVelocity-0));
+			
+			// // // END LQR
+			
+			Fc_calcualted := Fc_calcualted + Fc_calcualted_lqr;
+			
+			motorMVoltCalc := ((Fc_calcualted * 0.025)/3)/1.8 * 10000;
+			
+			
+			// %% && Add extra Stiction Friction Torque:
+			IF motorMVoltCalc > 250 THEN
+				motorMVoltCalc := motorMVoltCalc + 500;
+			ELSIF motorMVoltCalc < -250 THEN
+				motorMVoltCalc := motorMVoltCalc - 500;
+			END_IF
+			// %% &&
+			
+			
+			// %% && Actuator
+			IF motorMVoltCalc > motorMVoltMaxMin THEN
+				actuatorError :=  motorMVoltCalc - motorMVoltMaxMin; 
+				GVL.motorVolt := LREAL_TO_INT( motorMVoltMaxMin );
+			ELSIF motorMVoltCalc < -motorMVoltMaxMin THEN
+				actuatorError :=  motorMVoltMaxMin + motorMVoltCalc; 
+				GVL.motorVolt := LREAL_TO_INT( -motorMVoltMaxMin );
+			ELSE
+				actuatorError := 0;
+				GVL.motorVolt := LREAL_TO_INT( motorMVoltCalc );
+			END_IF
+			
+			// // Set values for next cycle.
+			// outputDerivativePrev := outputDerivative;
+			pendulErrorPrev := pendulError;
+			// //
+		
+		END_IF
+	
+	50: // Sinus signal test 
+		GVL.enableMotor := TRUE;
+		
+		t := t + 0.010;
+		amp1 := 2500;
+		GVL.motorVolt := LREAL_TO_INT( amp1 * SIN(0.8*2*3.14*t + 0) );
+		//GVL.motorVolt := GVL.motorVolt + LREAL_TO_INT( 750 * SIN(0.1*2*3.14*t + 90) );
+		//GVL.motorVolt := GVL.motorVolt + LREAL_TO_INT( 500 * SIN(1*2*3.14*t + 0) );
+		IF recordCounter < 4000 THEN
+			forceArray[recordCounter] := GVL.motorVolt;
+			positionArray[recordCounter] := Motor_Encoder.CurrentValue;
+			pendulPosArray[recordCounter] := Pendul_Q;
+	
+			recordCounter := recordCounter + 1;
+		ELSE
+			GVL.enableMotor := FALSE;	
+			state := 99;
+		END_IF
+		
+		
+	99: // ERROR 
+		GVL.enableMotor := FALSE;
+		RunPID := FALSE;
+		
+END_CASE
+Pendul_Q_Prew := Pendul_Q;
+cartPos_prev := Cart_pos;
+volt_prev := GVL.motorVolt;
+pendulVelocityPrev := pendulVelocity;
+
+// // Log Data
+IF recordCounter < 20000 THEN
+	forceArray[recordCounter] := Fc_calcualted;
+	TorqueArray[recordCounter] := GVL.motorVolt;
+	positionArray[recordCounter] := Motor_Encoder.CurrentValue;
+	pendulPosArray[recordCounter] := Pendul_Q;
+	pendulErrorArray[recordCounter] := pendulError;
+	recordCounter := recordCounter + 1;
+ELSE
+	GVL.enableMotor := FALSE;	
+	state := 99;
+END_IF
+
+// // END Log Data
+
+// SAFTEY 
+IF state > 5 AND state < 99 THEN
+	IF GVL.safetyLeft = FALSE THEN
+		GVL.enableMotor := TRUE;
+		GVL.motorVolt := 0;
+		RunPID := FALSE;
+		state := 99;
+	ELSIF GVL.safetyRight = FALSE THEN
+		GVL.enableMotor := TRUE;
+		GVL.motorVolt := 0;
+		RunPID := FALSE;
+		state := 99;
+	END_IF
+END_IF
+
+// Run Function Block
+Pendul_Encoder();
+Motor_Encoder();
+
+
+
+// // Variables init for SR-Main (PRG)
+PROGRAM SR_Main
+VAR
+	onPendul: BOOL := TRUE;
+	Pendul_Q: LREAL;
+	pendulEncCur: LREAL;
+	t: LREAL;
+	frekvens: REAL;
+	amplityde: REAL;
+	fase: REAL;
+	tid : TIME := T#0S;
+	sin1 : REAL;
+	amp1 : REAL;
+	sin2 : REAL;
+	sin3 : REAL;
+	risingEdge: R_TRIG;
+	state: DINT := 0;
+	Homing: F_Home;
+	pendulVelocity: LREAL;
+	pendulVelocityPrev: LREAL;
+	pendulError: LREAL;
+	pendulErrorPrev: LREAL := 0;
+	pendulIntegralError: LREAL;
+	outputDerivative: LREAL;
+	outputDerivativePrev: LREAL := 0;
+	Kp: LREAL := 125;  //470; //
+	Ki: LREAL := 635;  //705; //
+	Kd: LREAL := 10.4;  //78.33; //
+	RunPID: BOOL := FALSE;
+	Fc_calcualted: LREAL;
+	Fc_calcualted_lqr: LREAL;
+	Pendul_Q_Prew: LREAL;
+	cycleTime: LREAL := 0.001;
+	Cart_pos: LREAL;
+	Cart_pos_Middle: LREAL;
+	Energi_Sys: LREAL;
+	accel_pendul: LREAL;
+	force_swing: LREAL;
+	Mc: LREAL := 0.5;
+	m: LREAL := 0.084;
+	I: LREAL := 0.0008575;
+	l: LREAL := 0.175;
+	g: LREAL := 9.82;
+	c: LREAL := 5;
+	b: LREAL := 0.0012;
+	Epot: LREAL := 0.2887;
+	cartVelocity: LREAL := 0;
+	cartVelocityPrev: LREAL := 0;
+	cartPos_prev: LREAL := 0; 
+	sign: LREAL := 0;
+	PendulumAngleSensor: LREAL;
+	PendulumAngleSensorPrev: LREAL;
+	AngleDiffPos: LREAL;
+	AngleDiffNeg: LREAL;
+	forceArray: ARRAY[0..19999] OF REAL;
+	TorqueArray: ARRAY[0..19999] OF REAL;
+	positionArray: ARRAY[0..19999] OF DINT;
+	pendulPosArray: ARRAY[0..19999] OF LREAL;
+	pendulErrorArray: ARRAY[0..19999] OF LREAL;
+	recordCounter: INT := 0;
+	motorMVoltCalc: LREAL := 0;
+	motorMVoltMaxMin: LREAL := 3000;
+	actuatorError: LREAL := 0;
+	FIR: LREAL;
+	volt_prev: INT;
+	// LQR var
+	K: ARRAY[1..4,1..1] OF LREAL := [-122.47, 371.62,-100.67 , 59.03]; //[-63.24, 319.11,-72.96 , 51.64];
+	ForceToTorque: LREAL;
+	ForceVoltConst: LREAL;
+	motorConstant: LREAL;
+	beltFriction: LREAL;
+	scaleTorque: LREAL;
+	current: LREAL;
+	currentMax: LREAL;
+	startFriction: LREAL;
+	desiredAccel: LREAL;
+	desiredCartVel: LREAL;
+	desiredMotorVel: LREAL;
+	motorVelPerServoV: LREAL := 0.0027;
+	motorAngularVelocity: LREAL;
+	motorVelScale: LREAL := 1;
+	maxRPM: LREAL;
+	currentScale: LREAL;
+	targetRPM: LREAL;
+	TorqueVal: LREAL;
+	k_swing: LREAL;
+	position_penalty: LREAL;
+	cart_max_swing: LREAL;
+END_VAR
+
+
+
+// // Global variables init list:
+VAR_GLOBAL
+	// Out
+	motorVolt: INT := 200;
+	// Out
+	enableMotor: BOOL := FALSE;
+	// Out
+	operationModeMotor: INT := 2;
+	// Out
+	enableSafety: BOOL := TRUE;
+	// Input
+	safetyLeft: BOOL;
+	// Input
+	safetyRight: BOOL;
+	// Input
+	servoNoFault: BOOL;
+	// Input
+	servoActive: BOOL;
+	enableMotorEncoder: BOOL := FALSE;
+	totalBeltEncoderLen: DINT;
+	Steps_pr_meters: LREAL := 39694.5;
+END_VAR
+
+
+// // Function block for homing the cart in the middle of the track.
+FUNCTION_BLOCK PUBLIC F_Home
+VAR_INPUT
+	//IN_Execute: BOOL;
+END_VAR
+VAR_OUTPUT
+	OUT_Done: BOOL;
+END_VAR
+VAR
+	F_State: INT := 0;
+	wait_count: INT := 0;
+END_VAR
+
+CASE F_State OF
+	0: // start / home
+	GVL.enableMotorEncoder := FALSE;
+	Motor_Encoder.F_Preset := FALSE;
+	GVL.enableMotor := TRUE;
+	GVL.motorVolt := -2000; // 
+	wait_count := 0;
+	OUT_DONE := FALSE;
+	//IF GVL.safetyRight = FALSE THEN
+	IF GVL.safetyLeft = FALSE THEN
+		GVL.motorVolt := 0;
+		GVL.enableMotor := TRUE;
+		F_State := 1;
+	END_IF
+	
+	1: // waits for cart to be stopped
+	wait_count := wait_count + 1;
+	IF wait_count >= 200 THEN
+		GVL.enableMotorEncoder := TRUE;
+		Motor_Encoder.F_Preset := TRUE;
+		wait_count := 0;
+		F_State := 2;
+	END_IF
+	
+	2: // find right sensor
+	GVL.enableMotor := TRUE;
+	GVL.motorVolt := 2000;
+	// Go to right sensor and messure the lenght in encoder count.
+	// IF GVL.safetyLeft = FALSE THEN
+	IF GVL.safetyRight = FALSE THEN
+		GVL.motorVolt := 0;
+		GVL.enableMotor := TRUE;
+		F_State := 3;
+	END_IF
+	
+	3: // waits for cart to be stopped
+	wait_count := wait_count + 1;
+	IF wait_count >= 200 THEN
+		GVL.totalBeltEncoderLen := Motor_Encoder.CurrentValue;
+		wait_count := 0;
+		F_State := 4;
+	END_IF
+	
+	4: // move to middle 
+	GVL.enableMotor := TRUE; 
+	GVL.motorVolt := -9000;
+	IF Motor_Encoder.CurrentValue <= (GVL.totalBeltEncoderLen - 200*2)/2 THEN
+		GVL.motorVolt := 0;
+		GVL.enableMotor := TRUE;
+		F_State := 5;
+	END_IF
+	
+	5: // do cool stuff   
+		OUT_Done := TRUE;
+		F_State := 0;
+	
+END_CASE
